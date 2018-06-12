@@ -1,11 +1,14 @@
 Clover genotype analysis supplementary
 ================
-11/06/2018 - 16:14:19
+12/06/2018 - 14:28:42
 
 -   [Introduction](#introduction)
 -   [Image Analysis](#image-analysis)
     -   [Cropping](#cropping)
     -   [Finding Pots](#finding-pots)
+-   [Growth Curves](#growth-curves)
+    -   [Time frame correction](#time-frame-correction)
+    -   [Heritability](#heritability)
 
 Introduction
 ============
@@ -919,4 +922,931 @@ if __name__=="__main__":
     print "Centre Sum:", centreSum([bestcentre[0]+1, bestcentre[0]-1], points)
     print "Centre Sum:", centreSum([bestcentre[0], bestcentre[0]-1], points)
     print "Centre Sum:", centreSum([bestcentre[0]+45, bestcentre[0]-102], points)
+```
+
+Growth Curves
+=============
+
+The main first script which loads and processes all of the data. Some scripts are not printed on here, but are located in the folder GrowthCurveAnalysis.
+
+``` r
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(drc)
+
+## Contains functinos for converting strings into time.
+# source("TimeConversion.R")
+
+## Contains functions for converting the Combinations into placements, and vice versa.
+## convertToPlacement(x) where x is the name of the combination
+## convertToPot(x) ...
+## convertToCamera(x) ...
+source("CameraConversion.R")
+
+## Supporting functions that make everything easier.
+## mergeVectors(x, y) Merge 2 string vectors by a seperator "_" and returning z
+## divide_by_harverst(df, combination_table) Takes a data.frame (df) and uses a combination_table which contains the harvest information
+## pickone(x) Takes the first element from vector x, assuming all values in this vector are identical.
+## predict_points(df) Takes the TAf table and predicts points linearly between points if there is more than 1 day between them.
+source("supportfunctions.R")
+
+##############################################
+## Compiling Harvest information
+##############################################
+
+harvested <- read.csv("nchain_harvested.tab.csv", sep=";")
+
+full_table <- read.table("clover.tab", header=TRUE, sep="\t")
+full_table <- full_table[!is.na(full_table$ID),]
+full_table <- full_table[!is.na(full_table$Table),]
+rownames(full_table) <- full_table$ID
+#full_table$ID <- NULL
+full_table$Cutting <- NULL
+full_table$Harvest <- NULL
+full_table$Potting <- NULL
+full_table$Status <- NULL
+full_table %>% arrange(ID) -> full_table
+full_table$Combination <- mergeVectors(full_table$Clover, full_table$Rhizobium)
+
+HarvestData <- read.csv("harvest1.csv", sep=";")
+names(HarvestData)[1] <- "barcode"
+HarvestData$Combination <- full_table[HarvestData$barcode,"Combination"]
+rownames(HarvestData) <- HarvestData$barcode
+HarvestData$harvest_date <- as.Date(HarvestData$harvest_date, format="%d/%m/%y")
+HarvestData$cutting_date <- as.Date(HarvestData$cutting_date, format="%d/%m/%y")
+HarvestData$inoculation_date <- as.Date(HarvestData$inoculation_date, format="%d/%m/%y")
+HarvestData$potting_date <- as.Date(HarvestData$potting_date, format="%d/%m/%y")
+HarvestData <- HarvestData[as.character(sort(HarvestData$barcode)),]
+rownames(HarvestData) <- HarvestData$Combination
+
+#full_table <- full_table[sort(harvested$Pot), ]
+full_table <- full_table[sort(HarvestData$barcode), ]
+
+#row.names(harvested) <- harvested$Pot
+#harvested$X.2 <- NULL
+#harvested <- harvested[as.character(sort(as.numeric(rownames(harvested)))),]
+
+#full_table$Harvest <- as.Date(harvested$date, format="%d/%m/%Y")
+full_table$Harvest <- as.Date(HarvestData$harvest_date, format="%d/%m/%y")
+
+combination_table <- full_table
+row.names(combination_table) <- combination_table$Combination
+
+##############################################
+## Loading the growth data
+##############################################
+
+TA <- read.csv("CloverImageDataTA.csv")
+
+all_names <- colnames(TA)[2:ncol(TA)]
+
+## Filter by harvested
+TA <- TA[,c("Time", full_table$Combination)]
+
+## Convert into Date.
+TA$Time <- as.Date(TA$Time, format="%Y/%m/%d - %H:%M")
+
+
+## melt from matrix into continuous data.frame
+TA <- melt(TA, id.vars = "Time", variable.name="Pot", value.name = "TotalArea")
+
+## Convert pixels into cm^2
+max_pixel_count <- 400*400
+crop_in_plate_size <- 40*40
+
+TA$TotalArea <- TA$TotalArea/max_pixel_count
+TA$TotalArea <- TA$TotalArea*crop_in_plate_size
+
+## Filter early days.
+TA %>% filter(Time!="2017-05-23") %>% filter(Time!="2017-05-22") -> TA
+
+## Add Camera ID and Pot ID to the data.frame
+TA %>% mutate(Camera = unlist(convertToCamera(Pot)),
+              Placement = unlist(convertToPot(Pot))) -> TA
+
+## Remove all rows with missing data.
+TA <- TA[!is.na(TA$TotalArea),]
+
+## Create per day summary data
+TA %>% group_by(Pot, Time) %>%
+    summarise(Std=sd(TotalArea), TotalArea=median(TotalArea), Camera=pickone(Camera),
+              Placement=pickone(Placement)) -> TAf
+
+## Convert into data.frame
+#TAf <- as.data.frame(TAf)
+
+## Remove missing data if any.
+TAf <- TAf[!is.na(TAf$TotalArea),]
+TAf <- TAf[!is.na(TAf$Std),]
+
+## Divided by harvest
+TAf$Period <- divide_by_harvest(TAf, combination_table)
+
+show <- function(Period){
+    length(unique(Period))>1
+}
+
+TAf %>% group_by(Pot) %>% filter(show(Period)) -> TAf
+
+##############################################
+## Filtering days (Done manually)
+##############################################
+
+## Contains the manual filtering list and black list.
+## manual_filter(pot, time) Uses the manual_list to filter if that day is in the list.
+## blacklist_filter(pot) If pot is in black_list then filter it.
+source('manual_list.R')
+
+TAf %>% group_by(Pot, Time) %>% filter(blacklist_filter(Pot)) -> TAblacklist
+
+in_filter <- Vectorize(function(Pot, Manual_list) {
+    exists(as.character(Pot), where=Manual_list)
+}, vectorize.args = "Pot")
+
+TAf %>% group_by(Pot, Time) %>% filter(!blacklist_filter(Pot)) %>%
+    filter(manual_filter(Pot, Time)) -> TAf
+
+## Add predicted results
+TAfpred <- predict_points(TAf)
+
+TAfpred %>% group_by(Pot, Time) -> TAf
+
+############################
+# Getting the growth rates #
+#####################################
+## Get growth rates using the medians
+#####################################
+
+TAf %>% group_by(Pot, Period) %>%
+    summarise(b=drm(TotalArea ~ Time, fct=L.4())$coefficients[1],
+              c=drm(TotalArea ~ Time, fct=L.4())$coefficients[2],
+              d=drm(TotalArea ~ Time, fct=L.4())$coefficients[3],
+              e=drm(TotalArea ~ Time, fct=L.4())$coefficients[4]) -> GrowthRates
+
+GrowthRates %>% arrange(b) -> GrowthRates
+
+GrowthRates <- as.data.frame(GrowthRates)
+#print(GrowthRates)
+```
+
+Collection of support functions to make the processing easier/faster
+
+``` r
+contains <- function(x, m){
+    if(m==x) return(TRUE)
+    FALSE
+}
+contains <- Vectorize(contains)
+
+mergeVectors <- function(x, y){
+    if(length(x)!=length(y)) stop("Vectors are of unequal length")
+    z <- vector(length=length(x))
+    for(i in 1:length(x)){
+        tmp <- paste(x[i], y[i], sep=".")
+        j <- 0
+        while(any(z==tmp)){
+            j <- j+1
+            tmp <- paste(x[i], y[i], as.character(j), sep=".")
+        }
+        z[i] <- tmp
+    }
+    z
+}
+
+divide_by_harvest <- function(df, combination_table){
+    v <- vector(length=nrow(df))
+    for(i in 1:nrow(df)){
+        if(df$Time[i]<combination_table[df$Pot[i], 'Harvest']){
+            v[i] <- "growth1"
+        } else {
+            v[i] <- "growth2"
+        }
+    }
+    v
+}
+
+pickone <- function(x) x[1]
+
+
+predict_points <- function(df){
+
+    new_df = data.frame()
+    last_day = NULL
+    new_pot = TRUE
+    pot_name = NULL
+    period = NULL
+    phantom = vector()
+
+    for(row in 1:nrow(df)){
+
+        if(new_pot==TRUE){
+            last_day = df$Time[row]
+            pot_name = as.character(df$Pot[row])
+            period = df$Period[row]
+            new_pot = FALSE
+            if(nrow(new_df)==0) new_df = df[row,]
+            else new_df = rbind(new_df, df[row,])
+            phantom <- c(phantom, "true data")
+        } else {
+
+            if(as.numeric(df$Time[row]-last_day) > 1){
+                Days <- last_day+1:(as.numeric(df$Time[row]-last_day)-1)
+
+                ## Find the results inbetween the Days.
+                temp <- data.frame(Time=df$Time[(row-1):row],
+                                   TotalArea=df$TotalArea[(row-1):row])
+                ### Do linear regression inbetween points
+                fit <- lm(TotalArea ~ Time, data=temp)
+                ### Predict points between.
+                new_points <- predict(fit, newdata=data.frame(Time=Days))
+                new_days <- data.frame(Pot=rep(df$Pot[row], times=length(Days)),
+                                       Time=Days,
+                                       Std=rep(0, times=length(Days)),
+                                       TotalArea=new_points,
+                                       Camera=rep(df$Camera[row], times=length(Days)),
+                                       Placement=rep(df$Placement[row], times=length(Days)),
+                                       Period=rep(df$Period[row], times=length(Days)))
+
+                new_days %>% group_by(Pot, Time) -> new_days
+                new_df = rbind(new_df, new_days)
+                phantom <- c(phantom, rep("predicted data", times=length(Days)))
+
+            }
+
+            last_day = df$Time[row]
+            new_df = rbind(new_df, df[row,])
+            phantom <- c(phantom, "true data")
+
+        }
+
+        if((row+1)<nrow(df) && pot_name!=as.character(df$Pot[row+1])){
+            new_pot = TRUE
+        }
+        if((row+1)<nrow(df) && period!=df$Period[row+1]){
+            new_pot = TRUE
+        }
+    }
+
+    new_df$Predicted = phantom
+    new_df
+}
+```
+
+Script which generated all of the growth figures.
+
+``` r
+#TA %>% group_by(Pot, Time) %>%
+#    summarise(Std=sd(TotalArea), TotalArea=median(TotalArea)) -> TAf
+
+#Cams <- unique((TAf %>% group_by(Camera, Placement, Pot))$Pot)
+Cams <- unique(GrowthRates$Pot)
+
+library(drc)
+
+for(Cam in Cams){
+    #TAf %>% filter(Camera==Cam) -> TAplot
+    TAf %>% filter(Pot==Cam) -> TAplot
+
+    print(Cam)
+
+    if(nrow(TAplot)==0) next
+
+    TAplot %>% filter(Period=="growth1") -> TAplot1
+    TAplot %>% filter(Period=="growth2") -> TAplot2
+
+    figure <- ggplot(TAplot, aes(x=Time, y=TotalArea, color=Period)) + geom_line(size=1.05) +
+        geom_errorbar(data=TAplot, aes(ymin=TotalArea-Std, ymax=TotalArea+Std),
+                      alpha=0.6, width=0.1) + geom_point(aes(color=Predicted)) +
+        labs(x="", title=paste(pickone(TAplot$Pot), pickone(TAplot$Camera),
+                               pickone(TAplot$Placement), collapse=" "),
+             y="Total Coverage (cm^2)") +
+        scale_x_date(date_labels = "%b %d", date_breaks = "2 days") + theme_bw() +
+        scale_y_continuous(limits=c(0, 1600)) +
+        scale_color_manual(values=c("red", "blue", "gray", "black"))
+
+    if(nrow(TAplot1)!=0){
+        logfit1 <- drm(TotalArea ~ Time, data=TAplot1, fct=L.4())
+        figure <- figure + geom_line(data=TAplot1, aes(x=Time, y=predict(logfit1)))
+    }
+    if(nrow(TAplot2)!=0){
+        logfit2 <- drm(TotalArea ~ Time, data=TAplot2, fct=L.4())
+        figure <- figure + geom_line(data=TAplot2, aes(x=Time, y=predict(logfit2)))
+    }
+
+    print(figure)
+
+}
+```
+
+Time frame correction
+---------------------
+
+Main scripts containing and doing the time frame correction
+
+``` r
+calculate_area <- function(x, y, a, b, baseline=0){
+    square <- (abs(min(y, b)-baseline))*(abs(a-x))
+    triangle <- ((abs(b-y))*(abs(a-x)))/2
+    square+triangle
+}
+
+area_under_the_curve <- function(TotalArea, Time){
+    base <- min(TotalArea)
+    n <- length(TotalArea)
+    total_area <- 0
+    for(i in 1:(n-1)){
+        total_area <- total_area + calculate_area(1, TotalArea[i], 2, TotalArea[i+1], base)
+    }
+    total_area
+}
+
+area_ratio <- function(TotalArea, Time){
+    total_area <- area_under_the_curve(TotalArea, Time)
+    max_area <- (max(TotalArea)-min(TotalArea))*length(TotalArea)
+    total_area/max_area
+}
+
+select_time_frame <- function(Pot, TotalArea, Time, func){
+
+    #print(as.character(Pot[1]))
+
+### Figure out whether this is the replicate .1, or has one.
+    sequence <- unlist(strsplit(as.character(Pot[1]), split=""))
+    n <- length(sequence)
+    if(all(sequence[(n-1):n]==c(".", "1"))) replicate <- TRUE
+    else replicate <- FALSE
+
+### Get name of replicate
+    if(replicate) other <- paste(head(sequence, n=n-2), collapse = "")
+    else other <- paste(c(sequence, ".", "1"), collapse = "")
+
+    H1 <- max(Time)
+    H2 <- max((TAf %>% filter(Pot==other, Period=="growth1"))$Time)
+    H1_t <- HarvestData[as.character(Pot)[1], "inoculation_date"]
+    H2_t <- HarvestData[other, "inoculation_date"]
+
+    if(H1<=H2) { H <- H1; Ht <- H1_t }
+    else { H <- H2; Ht <- H2_t }
+
+    in1 <- HarvestData[as.character(Pot)[1], "inoculation_date"]
+    in2 <- HarvestData[other, "inoculation_date"]
+
+    start_date <- as.Date("2017-05-24", format="%Y-%m-%d")
+
+    ### Find common regions, which are comparable.
+    ## Find biggest common region, with min(HarvestDate)-max(Inoculationdate)
+
+    if(in1<in2){
+        y <- in2 - in1
+        p_start_date <- start_date
+
+        #cat(as.character(Pot[1]), Ht-H, y, "\n")
+
+        if((Ht-H)>y){
+            #cat("This is true \n")
+            x <- H - p_start_date
+        } else {
+            x <- H - p_start_date - y
+        }
+
+        p_end_date <- p_start_date + x
+    } else {
+        y <- in1 - in2
+        p_start_date <- start_date+y
+
+        if((Ht-H)>y){
+            #cat("This is also true \n")
+            x <- H - start_date
+            #x <- x + y
+            #print(x)
+        } else {
+            #cat("Why is this one true? \n")
+            x <- H - p_start_date
+        }
+
+        p_end_date <- p_start_date + x
+    }
+
+    data.frame(Time=Time, TotalArea) %>%
+        filter(Time>=p_start_date, Time<=p_end_date) -> df
+
+    Time <- df$Time
+    TotalArea <- df$TotalArea
+
+    func(TotalArea, Time)
+}
+
+is_or_has_replicate <- function(Name, names){
+    sequence <- unlist(strsplit(as.character(Name), split=""))
+    n <- length(sequence)
+    if(all(sequence[(n-1):n]==c(".", "1"))) is_replicate <- TRUE
+    else is_replicate <- FALSE
+    if(is_replicate){
+        non_replicate <- paste(sequence[1:(n-2)], collapse="")
+        if(any(names==non_replicate)) return(TRUE)
+        else return(FALSE)
+    } else {
+        non_replicate <- paste(c(sequence, ".1"), collapse="")
+        if(any(names==non_replicate)) return(TRUE)
+        else return(FALSE)
+    }
+}
+
+all_names <- as.character(unique(TAf$Pot))
+TAf %>% filter(is_or_has_replicate(Pot, all_names)) %>% group_by(Pot, Period) %>%
+    summarise(AreaRatio=area_ratio(TotalArea, Time),
+              Area=area_under_the_curve(TotalArea, Time),
+              incoluation_date=HarvestData[Pot, "inoculation_date"][1],
+              harvest_date=HarvestData[Pot, "harvest_date"][1]) %>%
+    arrange(Pot) -> TAarea
+
+TAf %>% filter(is_or_has_replicate(Pot, all_names), Period=="growth1") %>%
+    group_by(Pot, Period) %>%
+    summarise(AreaRatio=select_time_frame(Pot, TotalArea, Time, area_ratio),
+              Area=select_time_frame(Pot, TotalArea, Time, area_under_the_curve)) -> TAarea
+
+TAarea$Pot <- as.character(TAarea$Pot)
+
+print(as.data.frame(TAarea %>% filter(Period=="growth1") %>% arrange(Pot)))
+
+#write.table(as.data.frame(TAarea %>% arrange(Pot)),
+#            file="AreaMeasurements2.csv", sep=",", row.names=FALSE)
+
+
+
+
+
+select_time_frame_filter <- function(Pot, TotalArea, Time){
+
+    #print(as.character(Pot[1]))
+
+### Figure out whether this is the replicate .1, or has one.
+    sequence <- unlist(strsplit(as.character(Pot[1]), split=""))
+    n <- length(sequence)
+    if(all(sequence[(n-1):n]==c(".", "1"))) replicate <- TRUE
+    else replicate <- FALSE
+
+### Get name of replicate
+    if(replicate) other <- paste(head(sequence, n=n-2), collapse = "")
+    else other <- paste(c(sequence, ".", "1"), collapse = "")
+
+    H1 <- max(Time)
+    H2 <- max((TAf %>% filter(Pot==other, Period=="growth1"))$Time)
+    H1_t <- HarvestData[as.character(Pot)[1], "harvest_date"]
+    H2_t <- HarvestData[other, "harvest_date"]
+
+    if(H1<=H2) { H <- H1; Ht <- H1_t }
+    else { H <- H2; Ht <- H2_t }
+
+    in1 <- HarvestData[as.character(Pot)[1], "inoculation_date"]
+    in2 <- HarvestData[other, "inoculation_date"]
+
+    start_date <- as.Date("2017-05-24", format="%Y-%m-%d")
+
+    ### Find common regions, which are comparable.
+    ## Find biggest common region, with min(HarvestDate)-max(Inoculationdate)
+
+    if(in1<in2){
+        y <- in2 - in1
+        p_start_date <- start_date
+
+        #cat(as.character(Pot[1]), Ht-H, y, "\n")
+
+        if((Ht-H)>y){
+            cat("This is true \n")
+            x <- H - p_start_date
+        } else {
+            x <- H - p_start_date - y
+        }
+
+        p_end_date <- p_start_date + x
+    } else {
+        y <- in1 - in2
+        p_start_date <- start_date+y
+
+        if((Ht-H)>y){
+            cat("This is also true \n")
+            x <- H - start_date
+            #x <- x + y
+            #print(x)
+        } else {
+            cat("Why is this one true? \n")
+            x <- H - p_start_date
+        }
+
+        p_end_date <- p_start_date + x
+    }
+
+    v <- ((Time>=p_start_date)+(Time<=p_end_date))>1
+    v
+}
+
+testGrowthCurveMini <- function(Plant, filter=TRUE){
+    Plants <- c(Plant, paste(Plant, ".1", sep=""))
+    print(Plants)
+    if(filter){
+        TAf %>% filter(any(as.character(Pot)==Plants), Period=="growth1") %>%
+            group_by(Pot) %>% filter(select_time_frame_filter(Pot, TotalArea, Time)) -> TAtemp
+    } else {
+        TAf %>% filter(any(as.character(Pot)==Plants), Period=="growth1") -> TAtemp
+    }
+
+    cat("Incoluation date of:", Plants[1], "\n")
+    print(HarvestData[Plants[1], "inoculation_date"])
+    cat("Incoluation date of:", Plants[2], "\n")
+    print(HarvestData[Plants[2], "inoculation_date"])
+    cat("Harvest date of:", Plants[1], "\n")
+    print(HarvestData[Plants[1], "harvest_date"])
+    cat("Harvest date of:", Plants[2], "\n")
+    print(HarvestData[Plants[2], "harvest_date"])
+
+    print(TAarea[TAarea$Pot==Plants[1],])
+    print(TAarea[TAarea$Pot==Plants[2],])
+
+    TAplot <- TAtemp
+
+    figure <- ggplot(TAplot, aes(x=Time, y=TotalArea, color=Pot)) + geom_line(size=1.05) +
+        geom_errorbar(data=TAplot, aes(ymin=TotalArea-Std, ymax=TotalArea+Std),
+                      alpha=0.6, width=0.1) + geom_point(aes(color=Predicted)) +
+        labs(x="", title=paste(pickone(TAplot$Pot), pickone(TAplot$Camera),
+                               pickone(TAplot$Placement), collapse=" ")) +
+        scale_x_date(date_labels = "%b %d", date_breaks = "2 days") + theme_bw() +
+        scale_y_continuous(limits=c(0, 1500)) +
+        scale_color_manual(values=c("red", "blue", "gray", "black"))
+
+    print(figure)
+
+}
+
+showtime <- function(pot){
+    (TAf %>% filter(Pot==pot))$Time
+}
+```
+
+Heritability
+------------
+
+The script containing all of the heritability estimatations, and prepartion of the data for the heritability estimates. In particular the harvest data is setup in this script.
+
+``` r
+library(lme4)
+
+TAarea$weight <- HarvestData[TAarea$Pot, "weight"]
+TAarea$growthday <- HarvestData[TAarea$Pot, "growth_day"]
+
+TAarea$Camera <- unlist(convertToCamera(TAarea$Pot))
+TAarea$Placement <- unlist(convertToPot(TAarea$Pot))
+
+combination_split <- Vectorize(function(x, i) unlist(strsplit(x, split=".", fixed=TRUE))[i],
+                               vectorize.args = "x")
+
+is_replicate <- function(x) c(2, 1)[is.na(combination_split(x, 3))+1]
+
+join <- Vectorize(function(x, y) paste(x, y, sep="."))
+
+TAarea$Clover <- combination_split(TAarea$Pot, 1)
+TAarea$Rhizobium <- combination_split(TAarea$Pot, 2)
+TAarea$Combination <- join(TAarea$Clover, TAarea$Rhizobium)
+TAarea$Replicate <- is_replicate(TAarea$Pot)
+
+TAarea$Inoculationdate <- HarvestData[TAarea$Pot, "inoculation_date"]
+TAarea$Harvestdate <- HarvestData[TAarea$Pot, "harvest_date"]
+
+
+TAarea$Period <- NULL
+
+Get_originals <- function(Name){
+    sequence <- unlist(strsplit(as.character(Name), split=""))
+    n <- length(sequence)
+    if(all(sequence[(n-1):n]==c(".", "1"))) return(FALSE)
+    else return(TRUE)
+}
+
+Get_originals <- Vectorize(Get_originals)
+
+Get_replicate <- function(Name){
+    paste(Name, ".1", sep="")
+}
+
+any_match <- function(x, y){
+    v <- vector(length=length(x))
+    j <-
+    for(i in 1:length(x)){
+        if(any(x[i]==y)) v[i] <- TRUE
+        else v[i] <- FALSE
+    }
+    v
+}
+
+## Score of 1 perfect consitency, 1-0 (varying degrees of constistency)
+## <0 inverse consistency, meaning the replicates are worse than the average.
+replicate_consistency <- function(dataset, measure){
+    x <- dataset[[measure]]
+    x <- x/max(x)
+    originals <- TAarea$Pot[Get_originals(as.character(dataset$Pot))]
+    within_variance <- 0
+    for(original in originals){
+        replicate <- Get_replicate(as.character(original))
+        pair <- c(original, replicate)
+        new_variance <- var(x[any_match(dataset$Pot, pair)])
+        if(!is.na(new_variance)) within_variance <- within_variance+new_variance
+    }
+    within_variance <- within_variance/length(originals)
+    total_variance <- var(x)
+    cat("Replicate variance:", within_variance, "\n")
+    cat("Total variance:", total_variance, "\n")
+    (total_variance-within_variance)/total_variance
+}
+
+replicate_consistency(TAarea, "weight")
+replicate_consistency(TAarea, "AreaRatio")
+replicate_consistency(TAarea, "growthday")
+replicate_consistency(TAarea, "Area")
+
+randint <- function(min, max) round(runif(1, min, max))
+
+
+find_minimum_time_frame <- function(Harvestdates, Inoculationdates){
+    as.numeric(min(Harvestdates-Inoculationdates))
+}
+
+
+normalize_weight <- function(growthrates, timeframe){
+    growthrates*timeframe
+}
+
+# Just transforms it into the growthday measurement, scaled by time.
+t <- find_minimum_time_frame(TAarea$Harvestdate, TAarea$Inoculationdate)
+TAarea$normweight <- normalize_weight(TAarea$growthday, t)
+replicate_consistency(TAarea, "normweight")
+
+normalized_replicate_time <- (TAf %>% filter(is_or_has_replicate(Pot, all_names), Period=="growth1") %>% group_by(Pot) %>% summarise(Days=sum(select_time_frame_filter(Pot, TotalArea, Time))))
+
+normalized_replicate_time <- as.data.frame(normalized_replicate_time)
+
+rownames(normalized_replicate_time) <- as.character(normalized_replicate_time$Pot)
+
+as.data.frame(normalized_replicate_time %>% arrange(as.character(Pot)))
+
+t <- as.numeric(TAarea$Harvestdate-TAarea$Inoculationdate)
+TAarea$normweight <- TAarea$weight*(normalized_replicate_time[TAarea$Pot, "Days"]/t)
+
+replicate_consistency(TAarea, "weight")
+replicate_consistency(TAarea, "AreaRatio")
+replicate_consistency(TAarea, "growthday")
+replicate_consistency(TAarea, "Area")
+replicate_consistency(TAarea, "normweight")
+
+multi_effective_strains <- as.character(read.delim("multi_effective_strains.csv", header=FALSE)$V1)
+multi_effective_strains[1] <- unlist(strsplit(multi_effective_strains[1], split="\277"))[2]
+
+TAarea %>% filter(any_match(Rhizobium, multi_effective_strains)) %>%
+    filter(is_or_has_replicate(Pot, all_names)) -> MEarea
+
+replicate_consistency(MEarea, "weight")
+replicate_consistency(MEarea, "AreaRatio")
+replicate_consistency(MEarea, "growthday")
+replicate_consistency(MEarea, "Area")
+replicate_consistency(MEarea, "normweight")
+
+fit <- glm(Area ~ Rhizobium, data=MEarea)
+fit2 <- glm(growthday ~ Rhizobium, data=MEarea)
+
+qplot(summary(fit2)$coefficients[,1], summary(fit)$coefficients[,1], xlim=c(-0.1, 0.3))
+
+HarvestData$rhizobium <- as.character(HarvestData$rhizobium)
+
+HarvestData %>% filter(any_match(rhizobium, multi_effective_strains)) -> MEharvest
+
+
+summary(glm(growth_day ~ rhizobium, data=MEharvest))
+
+
+fit <- lm(Area ~ Rhizobium, data=MEarea)
+fit2 <- lm(growth_day ~ rhizobium, data=MEharvest)
+
+summary(fit)
+summary(fit2)
+
+qplot(summary(fit2)$coefficients[c(-1, -21),1], summary(fit)$coefficients[-1,1], xlim=c(-0.1, 0.3))
+
+
+fit <- lm(Area ~ Rhizobium + Clover, data=MEarea)
+fit2 <- lm(growth_day ~ rhizobium + clover, data=MEharvest)
+
+summary(fit)
+summary(fit2)
+
+qplot(summary(fit2)$coefficients[c(2:20, 22:23),1], summary(fit)$coefficients[2:22,1])
+
+AreaTable <- as.data.frame(summary(fit)$coefficients[2:22,])
+AreaTable$Names <- rownames(summary(fit)$coefficients[2:22,])
+AreaTable <- AreaTable[, c('Names', 'Estimate')]
+
+GrowthTable <- as.data.frame(summary(fit2)$coefficients[2:22,])
+GrowthTable$Names <- rownames(summary(fit2)$coefficients[2:22,])
+GrowthTable <- GrowthTable[, c('Names', 'Estimate')]
+
+MEharvest %>% filter(any_match(Combination, MEarea$Pot)) -> MEharvestsample
+
+MEarea$Rhizobium <- as.factor(MEarea$Rhizobium)
+MEarea$Clover <- as.factor(MEarea$Clover)
+
+MEharvest$rhizobium <- as.factor(MEharvest$rhizobium)
+MEharvest$clover <- as.factor(MEharvest$clover)
+
+fit <- glm(Area ~ Rhizobium + Clover, data=MEarea)
+fit2 <- glm(growth_day ~ rhizobium + clover, data=MEharvest)
+
+summary(fit)
+summary(fit2)
+
+summary(glht(fit2, linfct=mcp(rhizobium="Tukey")))
+
+qplot(summary(fit2)$coefficients[c(2:20, 22:23),1], summary(fit)$coefficients[2:22,1])
+
+AreaTable <- as.data.frame(summary(fit)$coefficients[2:22,])
+AreaTable$Names <- rownames(summary(fit)$coefficients[2:22,])
+AreaTable <- AreaTable[, c('Names', 'Estimate')]
+
+GrowthTable <- as.data.frame(summary(fit2)$coefficients[2:22,])
+GrowthTable$Names <- rownames(summary(fit2)$coefficients[2:22,])
+GrowthTable <- GrowthTable[, c('Names', 'Estimate')]
+
+
+qplot(MEarea$growthday, MEarea$Area)
+
+cor(MEarea$growthday, MEarea$Area, method="spearman")
+
+cor(summary(fit2)$coefficients[c(2:20, 22:23),1], summary(fit)$coefficients[2:22,1], method="spearman")
+
+
+fit <- lm(Area ~ Rhizobium, data=MEarea)
+
+summary(fit)
+
+summary(glht(fit, linfct=mcp(Rhizobium="Tukey")))
+
+
+MEarea$Clover <- factor(MEarea$Clover)
+
+fit <- lm(growthday ~ Rhizobium + Clover, data=MEarea)
+
+summary(fit)
+
+filtered <- (MEarea %>% filter(!any_match(Clover, c("Aalon_0718", "Aoost_0215",
+                                                       "Banna_0733", "Clfin_0213",
+                                                       "Banca_0947", "Clfin_0102",
+                                                       "Aalon_0617", "Aalon_0512")),
+                                  !any_match(Rhizobium, c("SM88"))))
+
+fit <- lm(Area ~ Rhizobium + Clover,
+          data=(MEarea %>% filter(!any_match(Clover, c("Aalon_0718", "Aoost_0215",
+                                                       "Banna_0733", "Clfin_0213",
+                                                       "Banca_0947", "Clfin_0102",
+                                                       "Aalon_0617", "Aalon_0512")),
+                                  !any_match(Rhizobium, c("SM88")))))
+
+
+summary(fit)
+
+significance_column <- Vectorize(function(pvalue){
+    if(pvalue>0.1) return(' ')
+    if(pvalue<=0.1 && pvalue>0.5) return('.')
+    if(pvalue<=0.5 && pvalue>0.01) return('*')
+    if(pvalue<=0.01 && pvalue>0.001) return('**')
+    if(pvalue<=0.001) return('***')
+})
+
+rhivrhi <- summary(glht(fit, linfct=mcp(Rhizobium="Tukey")))
+
+rvrtable <- data.frame(estimates=rhivrhi$test$coefficients)
+rvrtable$std.error <- rhivrhi$test$sigma
+rvrtable$tvalue <- rhivrhi$test$tstat
+rvrtable$pvalue <- rhivrhi$test$pvalues
+rvrtable[[' ']] <- significance_column(rvrtable$pvalue)
+rvrtable <- cbind(rownames(rvrtable), rvrtable)
+colnames(rvrtable)[1] <- "Test"
+
+rvrtable %>% filter(pvalue<0.05)
+
+
+
+arearc <- lm(Area ~ Rhizobium + Clover, data=MEarea)
+areatable <- as.data.frame(summary(arearc)$coefficients)
+colnames(areatable)[4] <- "p.value"
+areatable <- cbind(rownames(areatable), areatable)
+colnames(areatable)[1] <- "Genotypes"
+
+
+areatable %>% filter(grepl("Rhizobium", Genotypes)) %>% filter(p.value<0.05) %>%
+    arrange(-Estimate) %>% mutate(' '=significance_column(p.value))
+
+gpdrc <- lm(growth_day ~ rhizobium + clover, data=MEharvest)
+gpdtable <- as.data.frame(summary(gpdrc)$coefficients)
+colnames(gpdtable)[4] <- "p.value"
+gpdtable <- cbind(rownames(gpdtable), gpdtable)
+colnames(gpdtable)[1] <- "Genotypes"
+
+gpdtable %>% filter(grepl("rhizobium", Genotypes)) %>% filter(p.value<0.05) %>%
+    arrange(-Estimate) %>% mutate(' '=significance_column(p.value))
+
+
+
+## Try Bayz for hertitability
+
+source("http://www.bayz.biz/Rbayz.R")
+
+BAYZHOME = "/usr/local/bin/"
+
+fit <- bayz.mm(data=MEarea, resp="Area", fixmod="fac.Replicate", ranmod="fac.Rhizobium+fac.Clover", chain=c(99900, 1000, 50))
+
+bayz.summ(fit)
+
+fit$post.mean[181]/(fit$post.mean[181]+fit$post.mean[117])
+
+## Replicate versus replicates
+
+(MEarea %>% filter(Replicate==1) %>% arrange(Pot))$Area
+(MEarea %>% filter(Replicate==2) %>% arrange(Pot))$Area
+
+qplot((MEarea %>% filter(Replicate==1) %>% arrange(Pot))$Area,
+(MEarea %>% filter(Replicate==2) %>% arrange(Pot))$Area) + theme_classic() +
+    labs(x="Area (Replicate 1)", y="Area (Replicate 2)")
+
+qplot((MEarea %>% filter(Replicate==1) %>% arrange(Pot))$growthday,
+(MEarea %>% filter(Replicate==2) %>% arrange(Pot))$growthday) + theme_classic() +
+    labs(x="Growth per day (Replicate 1)", y="Growth per day (Replicate 2)")
+
+qplot((MEarea %>% filter(Replicate==1) %>% arrange(Pot))$weight,
+(MEarea %>% filter(Replicate==2) %>% arrange(Pot))$weight) + theme_classic() +
+    labs(x="Weight (Replicate 1)", y="Weight (Replicate 2)")
+
+qplot((MEarea %>% filter(Replicate==1) %>% arrange(Pot))$AreaRatio,
+(MEarea %>% filter(Replicate==2) %>% arrange(Pot))$AreaRatio) + theme_classic() +
+    labs(x="Area ratio (Replicate 1)", y="Area ratio (Replicate 2)")
+
+cat("Area replicate correlation:",
+cor((MEarea %>% filter(Replicate==1) %>% arrange(Pot))$Area,
+(MEarea %>% filter(Replicate==2) %>% arrange(Pot))$Area), "\n")
+
+cat("Growth per day replicate correlation:",
+cor((MEarea %>% filter(Replicate==1) %>% arrange(Pot))$growthday,
+(MEarea %>% filter(Replicate==2) %>% arrange(Pot))$growthday), "\n")
+
+cat("Weight replicate correlation:",
+cor((MEarea %>% filter(Replicate==1) %>% arrange(Pot))$weight,
+(MEarea %>% filter(Replicate==2) %>% arrange(Pot))$weight), "\n")
+
+cat("Weight replicate correlation:",
+cor((MEarea %>% filter(Replicate==1) %>% arrange(Pot))$AreaRatio,
+(MEarea %>% filter(Replicate==2) %>% arrange(Pot))$AreaRatio), "\n")
+
+## Calculate heritiabilities
+
+
+calculate_heritability <- function(lmerMod, variable){
+    RE <- as.data.frame(VarCorr(lmerMod))
+    if(!class(variable)=="character") stop("Variable must be a string of Characters!")
+    if(length(variable)==1) {
+        return(RE[RE$grp==variable, "vcov"]/sum(RE$vcov))
+    }
+
+print(RE)
+
+    any_match <- function(x, y){
+        v <- vector(length=length(x))
+        j <-
+            for(i in 1:length(x)){
+                if(any(x[i]==y)) v[i] <- TRUE
+                else v[i] <- FALSE
+            }
+        v
+    }
+
+    if(length(variable)>1){
+        return(sum(RE[any_match(RE$grp,variable), "vcov"])/sum(RE$vcov))
+    }
+}
+
+fit <- lmer(growthday ~ factor(Replicate) + (1|Rhizobium) + (1|Clover),
+            data=MEarea)
+
+calculate_heritability(fit, c("Rhizobium", "Clover"))
+
+fit <- lmer(Area ~ factor(Replicate) + (1|Rhizobium) + (1|Clover),
+            data=MEarea)
+
+calculate_heritability(fit, c("Rhizobium", "Clover"))
+
+fit <- lmer(weight ~ factor(Replicate) + (1|Rhizobium) + (1|Clover),
+            data=MEarea)
+
+calculate_heritability(fit, c("Rhizobium", "Clover"))
+
+fit <- lmer(AreaRatio ~ factor(Replicate) + (1|Rhizobium) + (1|Clover),
+            data=MEarea)
+
+calculate_heritability(fit, c("Rhizobium", "Clover"))
 ```
