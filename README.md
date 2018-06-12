@@ -1,6 +1,6 @@
-Clover genotype analysis supplementary
+Clover image analysis supplementary + Clover grass analysis
 ================
-12/06/2018 - 14:28:42
+12/06/2018 - 14:30:44
 
 -   [Introduction](#introduction)
 -   [Image Analysis](#image-analysis)
